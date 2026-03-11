@@ -1,0 +1,15 @@
+services:
+  trend-reader:
+    build: .
+    container_name: ai-trend-reader
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - SERVERCHAN_SENDKEY=${SERVERCHAN_SENDKEY}
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    # Uncomment for one-shot execution instead of cron:
+    # command: python -m ai_trend_reader

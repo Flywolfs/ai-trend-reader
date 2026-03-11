@@ -1,0 +1,5 @@
+# Run AI Trend Reader daily at 8:00 AM Beijing time (0:00 UTC)
+# Adjust the schedule as needed
+0 8 * * * cd /app && python -m ai_trend_reader >> /app/data/cron.log 2>&1
+
+# Empty line required by cron
