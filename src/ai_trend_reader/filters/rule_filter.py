@@ -1,10 +1,10 @@
-"""Rule-based filter for GitHub repos and Arxiv papers."""
+"""Rule-based filter for GitHub repos, Arxiv papers, and HuggingFace papers."""
 
 from __future__ import annotations
 
 import structlog
 
-from ai_trend_reader.config import ArxivConfig, GitHubConfig, RuleFilterConfig
+from ai_trend_reader.config import ArxivConfig, GitHubConfig, HuggingFaceConfig, RuleFilterConfig
 from ai_trend_reader.filters.base import BaseFilter
 from ai_trend_reader.models import Source, TrendItem
 
@@ -17,6 +17,7 @@ class RuleFilter(BaseFilter):
         config: RuleFilterConfig,
         github_config: GitHubConfig,
         arxiv_config: ArxivConfig,
+        huggingface_config: HuggingFaceConfig | None = None,
     ):
         self.config = config
         self.github_keywords = [kw.lower() for kw in github_config.keywords]
@@ -29,6 +30,8 @@ class RuleFilter(BaseFilter):
                 passed.append(item)
             elif item.source == Source.ARXIV and self._check_arxiv(item):
                 passed.append(item)
+            elif item.source == Source.HUGGINGFACE and self._check_huggingface(item):
+                passed.append(item)
 
         logger.info(
             "rule_filter_complete",
@@ -38,6 +41,8 @@ class RuleFilter(BaseFilter):
         return passed
 
     def _check_github(self, item: TrendItem) -> bool:
+        """GitHub Trending items already have high signal.
+        Only apply basic filters; let LLM decide AI relevance."""
         meta = item.metadata
         rules = self.config.github
 
@@ -55,15 +60,8 @@ class RuleFilter(BaseFilter):
             if lang and lang not in rules.language_whitelist:
                 return False
 
-        # Keyword match in name + description + topics
-        searchable = " ".join([
-            item.title.lower(),
-            item.description.lower(),
-            " ".join(meta.get("topics", [])),
-        ])
-        if not any(kw in searchable for kw in self.github_keywords):
-            return False
-
+        # GitHub Trending items are already curated, pass all through
+        # LLM will handle AI relevance scoring
         return True
 
     def _check_arxiv(self, item: TrendItem) -> bool:
@@ -72,6 +70,21 @@ class RuleFilter(BaseFilter):
         if not rules.require_keyword_match:
             return True
 
-        # Check keyword match in title + description (case-insensitive)
         searchable = f"{item.title} {item.description}".lower()
         return any(kw.lower() in searchable for kw in self.arxiv_keywords)
+
+    def _check_huggingface(self, item: TrendItem) -> bool:
+        rules = self.config.huggingface
+
+        # Minimum upvotes
+        if item.metadata.get("upvotes", 0) < rules.min_upvotes:
+            return False
+
+        # Optional keyword match
+        if rules.require_keyword_match:
+            searchable = f"{item.title} {item.description}".lower()
+            keywords = self.arxiv_keywords  # Reuse arxiv keywords for HF papers
+            if not any(kw in searchable for kw in keywords):
+                return False
+
+        return True

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class Source(str, Enum):
     GITHUB = "github"
     ARXIV = "arxiv"
+    HUGGINGFACE = "huggingface"
 
 
 class AIDomain(str, Enum):
@@ -49,6 +50,7 @@ class DigestReport(BaseModel):
     date: str
     github_items: list[ScoredItem] = Field(default_factory=list)
     arxiv_items: list[ScoredItem] = Field(default_factory=list)
+    huggingface_items: list[ScoredItem] = Field(default_factory=list)
     stats: DigestStats = Field(default_factory=lambda: DigestStats())
 
 
@@ -61,3 +63,6 @@ class DigestStats(BaseModel):
     arxiv_fetched: int = 0
     arxiv_after_rules: int = 0
     arxiv_recommended: int = 0
+    huggingface_fetched: int = 0
+    huggingface_after_rules: int = 0
+    huggingface_recommended: int = 0

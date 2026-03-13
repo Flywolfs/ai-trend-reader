@@ -39,8 +39,18 @@ def _build_user_prompt(items: list[TrendItem]) -> str:
         if item.source == Source.GITHUB:
             stars = item.metadata.get("stars", "N/A")
             lang = item.metadata.get("language", "N/A")
-            topics = ", ".join(item.metadata.get("topics", []))
-            meta_str = f"Stars: {stars}, 语言: {lang}, Topics: {topics}"
+            stars_today = item.metadata.get("stars_today", "N/A")
+            meta_str = (
+                f"Stars: {stars}, 今日新增: {stars_today}, 语言: {lang}"
+            )
+        elif item.source == Source.HUGGINGFACE:
+            upvotes = item.metadata.get("upvotes", 0)
+            org = item.metadata.get("organization", "")
+            authors = ", ".join(item.metadata.get("authors", [])[:3])
+            gh = item.metadata.get("github_repo", "")
+            meta_str = f"Upvotes: {upvotes}, 机构: {org}, 作者: {authors}"
+            if gh:
+                meta_str += f", GitHub: {gh}"
         else:
             cats = ", ".join(item.metadata.get("categories", []))
             authors = ", ".join(item.metadata.get("authors", [])[:3])

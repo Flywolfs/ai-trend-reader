@@ -51,7 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        choices=["github", "arxiv"],
+        choices=["github", "arxiv", "huggingface"],
         default=None,
         help="Only fetch from a specific source",
     )
@@ -104,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             "finished",
             github=report.stats.github_recommended,
             arxiv=report.stats.arxiv_recommended,
+            huggingface=report.stats.huggingface_recommended,
         )
         return 0
     except KeyboardInterrupt:

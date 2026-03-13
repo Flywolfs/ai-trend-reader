@@ -18,12 +18,11 @@ class GitHubConfig(BaseModel):
         "ai-agent", "langchain", "autogen", "mcp-server", "function-calling",
         "mlops", "model-serving", "vllm", "inference-engine",
     ]
-    topics: list[str] = [
-        "llm", "ai-agent", "stable-diffusion", "machine-learning",
-        "deep-learning", "generative-ai", "text-to-image", "langchain",
-    ]
-    search_days_back: int = 7
-    max_results_per_query: int = 100
+
+
+class HuggingFaceConfig(BaseModel):
+    enabled: bool = True
+    max_results: int = 100
 
 
 class ArxivConfig(BaseModel):
@@ -46,12 +45,18 @@ class GitHubRuleConfig(BaseModel):
     language_whitelist: list[str] | None = None
 
 
+class HuggingFaceRuleConfig(BaseModel):
+    min_upvotes: int = 3
+    require_keyword_match: bool = False
+
+
 class ArxivRuleConfig(BaseModel):
     require_keyword_match: bool = True
 
 
 class RuleFilterConfig(BaseModel):
     github: GitHubRuleConfig = Field(default_factory=GitHubRuleConfig)
+    huggingface: HuggingFaceRuleConfig = Field(default_factory=HuggingFaceRuleConfig)
     arxiv: ArxivRuleConfig = Field(default_factory=ArxivRuleConfig)
 
 
@@ -73,6 +78,7 @@ class NotifyConfig(BaseModel):
     serverchan: ServerChanConfig = Field(default_factory=ServerChanConfig)
     max_github_items: int = 10
     max_arxiv_items: int = 10
+    max_huggingface_items: int = 10
 
 
 class StorageConfig(BaseModel):
@@ -92,12 +98,13 @@ class Settings(BaseSettings):
     )
 
     # Secrets from environment variables
-    github_token: str = "xx"
-    llm_api_key: str = "sk-xx"
-    serverchan_sendkey: str = "xx"
+    github_token: str = ""
+    llm_api_key: str = "sk-"
+    serverchan_sendkey: str = ""
 
     # Nested config sections
     github: GitHubConfig = Field(default_factory=GitHubConfig)
+    huggingface: HuggingFaceConfig = Field(default_factory=HuggingFaceConfig)
     arxiv: ArxivConfig = Field(default_factory=ArxivConfig)
     rule_filter: RuleFilterConfig = Field(default_factory=RuleFilterConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)

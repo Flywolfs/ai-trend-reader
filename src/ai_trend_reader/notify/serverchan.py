@@ -61,9 +61,14 @@ class ServerChanNotifier(BaseNotifier):
         # Overview section
         lines.append("## 今日概览\n")
         lines.append(
-            f"- GitHub: 采集 {stats.github_fetched} 个项目, "
+            f"- GitHub Trending: 采集 {stats.github_fetched} 个项目, "
             f"规则筛选 {stats.github_after_rules} 个, "
             f"推荐 **{stats.github_recommended}** 个"
+        )
+        lines.append(
+            f"- HuggingFace Papers: 采集 {stats.huggingface_fetched} 篇论文, "
+            f"规则筛选 {stats.huggingface_after_rules} 篇, "
+            f"推荐 **{stats.huggingface_recommended}** 篇"
         )
         lines.append(
             f"- Arxiv: 采集 {stats.arxiv_fetched} 篇论文, "
@@ -74,9 +79,16 @@ class ServerChanNotifier(BaseNotifier):
         # GitHub section
         if report.github_items:
             lines.append("\n---\n")
-            lines.append("## GitHub 热门项目\n")
+            lines.append("## GitHub Trending 热门项目\n")
             for i, scored in enumerate(report.github_items, 1):
                 lines.append(self._format_github_item(i, scored))
+
+        # HuggingFace section
+        if report.huggingface_items:
+            lines.append("\n---\n")
+            lines.append("## HuggingFace 每日精选论文\n")
+            for i, scored in enumerate(report.huggingface_items, 1):
+                lines.append(self._format_huggingface_item(i, scored))
 
         # Arxiv section
         if report.arxiv_items:
@@ -102,17 +114,48 @@ class ServerChanNotifier(BaseNotifier):
         stars = item.metadata.get("stars", "N/A")
         lang = item.metadata.get("language", "")
         lang_str = f" | {lang}" if lang else ""
+        stars_today = item.metadata.get("stars_today", 0)
+
+        score = scored.relevance_score
+        header = (
+            f"### {idx}. [{item.source_id}]({item.url})"
+            f" | {stars} stars (+{stars_today} today){lang_str}"
+            f" | 评分: {score:.1f}"
+        )
+        lines = [header]
+        if item.description:
+            lines.append(f"> {item.description[:200]}")
+        if scored.summary_zh:
+            lines.append(f"> {scored.summary_zh}")
+        if scored.reason:
+            lines.append(f"> 推荐理由: {scored.reason}")
+        lines.append(f"> 领域: {scored.domain.value}\n")
+        return "\n".join(lines)
+
+    def _format_huggingface_item(self, idx: int, scored: ScoredItem) -> str:
+        item = scored.item
+        upvotes = item.metadata.get("upvotes", 0)
+        org = item.metadata.get("organization", "")
+        authors = item.metadata.get("authors", [])
+        author_str = ", ".join(authors[:3])
+        if len(authors) > 3:
+            author_str += " et al."
+        github_repo = item.metadata.get("github_repo", "")
 
         score = scored.relevance_score
         header = (
             f"### {idx}. [{item.title}]({item.url})"
-            f" | {stars} stars{lang_str} | 评分: {score:.1f}"
+            f" | {upvotes} upvotes | 评分: {score:.1f}"
         )
         lines = [header]
         if scored.summary_zh:
             lines.append(f"> {scored.summary_zh}")
         if scored.reason:
             lines.append(f"> 推荐理由: {scored.reason}")
+        org_str = f" | 机构: {org}" if org else ""
+        lines.append(f"> 作者: {author_str}{org_str}")
+        if github_repo:
+            lines.append(f"> GitHub: {github_repo}")
         lines.append(f"> 领域: {scored.domain.value}\n")
         return "\n".join(lines)
 

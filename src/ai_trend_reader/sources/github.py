@@ -1,9 +1,9 @@
-"""GitHub data source using Search API."""
+"""GitHub data source via GitHub Trending page scraping."""
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import datetime, timezone
 
 import httpx
 import structlog
@@ -14,109 +14,145 @@ from ai_trend_reader.sources.base import BaseSource
 
 logger = structlog.get_logger()
 
-GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
+GITHUB_TRENDING_URL = "https://github.com/trending"
+
+
+def _parse_number(text: str) -> int:
+    """Parse a number string like '1,234' or '31,680' into an int."""
+    return int(text.strip().replace(",", ""))
 
 
 class GitHubSource(BaseSource):
-    def __init__(self, config: GitHubConfig, token: str):
+    def __init__(self, config: GitHubConfig, token: str = ""):
         self.config = config
-        self.headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if token:
-            self.headers["Authorization"] = f"Bearer {token}"
 
     async def fetch(self) -> list[TrendItem]:
         if not self.config.enabled:
             logger.info("github_source_disabled")
             return []
 
-        queries = self._build_queries()
-        all_items: dict[str, TrendItem] = {}
+        logger.info("github_trending_fetch_start")
+        items: list[TrendItem] = []
 
-        async with httpx.AsyncClient(headers=self.headers, timeout=30) as client:
-            for query in queries:
-                try:
-                    items = await self._search(client, query)
-                    for item in items:
-                        if item.source_id not in all_items:
-                            all_items[item.source_id] = item
-                    # Respect GitHub rate limit: max 10 requests per minute for search
-                    await asyncio.sleep(6)
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 403:
-                        reset = e.response.headers.get("X-RateLimit-Reset")
-                        logger.warning("github_rate_limited", reset_at=reset)
-                        if reset:
-                            wait = int(reset) - int(datetime.now(timezone.utc).timestamp()) + 1
-                            if 0 < wait < 120:
-                                logger.info("github_waiting_for_reset", seconds=wait)
-                                await asyncio.sleep(wait)
-                                continue
-                        break
-                    logger.error("github_search_error", status=e.response.status_code, query=query)
-                except Exception:
-                    logger.exception("github_search_unexpected_error", query=query)
+        try:
+            async with httpx.AsyncClient(
+                timeout=30,
+                headers={"User-Agent": "AI-Trend-Reader/1.0"},
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(
+                    GITHUB_TRENDING_URL,
+                    params={"since": "daily"},
+                )
+                resp.raise_for_status()
+                html = resp.text
 
-        logger.info("github_fetch_complete", total=len(all_items))
-        return list(all_items.values())
+            items = self._parse_trending_html(html)
+            logger.info("github_trending_fetch_complete", total=len(items))
 
-    def _build_queries(self) -> list[str]:
-        """Build multiple search queries for comprehensive coverage."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.config.search_days_back)
-        date_str = cutoff.strftime("%Y-%m-%d")
-        queries = []
+        except Exception:
+            logger.exception("github_trending_fetch_error")
 
-        # Topic-based searches
-        for topic in self.config.topics:
-            queries.append(f"topic:{topic} created:>{date_str} sort:stars")
-
-        # Keyword-based searches (group keywords to reduce query count)
-        keyword_groups = [
-            self.config.keywords[i : i + 3]
-            for i in range(0, len(self.config.keywords), 3)
-        ]
-        for group in keyword_groups:
-            q = " OR ".join(group)
-            queries.append(f"{q} created:>{date_str} sort:stars")
-
-        return queries
-
-    async def _search(self, client: httpx.AsyncClient, query: str) -> list[TrendItem]:
-        """Execute a single search query."""
-        params = {
-            "q": query,
-            "sort": "stars",
-            "order": "desc",
-            "per_page": min(self.config.max_results_per_query, 100),
-        }
-
-        logger.debug("github_search", query=query)
-        resp = await client.get(GITHUB_SEARCH_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-        items = []
-        for repo in data.get("items", []):
-            item = TrendItem(
-                source=Source.GITHUB,
-                source_id=repo["full_name"],
-                title=repo["name"],
-                url=repo["html_url"],
-                description=repo.get("description") or "",
-                metadata={
-                    "stars": repo["stargazers_count"],
-                    "language": repo.get("language"),
-                    "topics": repo.get("topics", []),
-                    "forks": repo["forks_count"],
-                    "created_at": repo["created_at"],
-                    "pushed_at": repo["pushed_at"],
-                    "owner": repo["owner"]["login"],
-                    "is_fork": repo.get("fork", False),
-                },
-            )
-            items.append(item)
-
-        logger.debug("github_search_results", query=query, count=len(items))
         return items
+
+    def _parse_trending_html(self, html: str) -> list[TrendItem]:
+        """Parse GitHub Trending HTML into TrendItems without BeautifulSoup.
+
+        Each trending repo is inside an <article class="Box-row"> element.
+        """
+        items: list[TrendItem] = []
+
+        # Split by article tags
+        articles = re.split(r'<article\s+class="Box-row"', html)
+        # First chunk is before the first article, skip it
+        for article_html in articles[1:]:
+            try:
+                item = self._parse_article(article_html)
+                if item:
+                    items.append(item)
+            except Exception:
+                logger.debug("github_trending_parse_article_error", exc_info=True)
+                continue
+
+        return items
+
+    def _parse_article(self, html: str) -> TrendItem | None:
+        """Parse a single <article> block into a TrendItem."""
+        # Extract repo path from the h2 link, e.g. href="/owner/repo"
+        # First isolate the <h2>...</h2> block, then find the <a href> inside it
+        h2_match = re.search(r'<h2[^>]*>(.*?)</h2>', html, re.DOTALL)
+        if not h2_match:
+            return None
+        h2_inner = h2_match.group(1)
+        repo_match = re.search(r'<a\s[^>]*href="(/[^"]+)"', h2_inner, re.DOTALL)
+        if not repo_match:
+            return None
+        repo_path = repo_match.group(1).strip().lstrip("/")
+        # repo_path should be "owner/repo"
+        parts = repo_path.split("/")
+        if len(parts) != 2:
+            return None
+
+        url = f"https://github.com/{repo_path}"
+
+        # Extract description: <p class="col-9 ...">...</p>
+        desc = ""
+        desc_match = re.search(r'<p\s+class="[^"]*col-9[^"]*"[^>]*>(.*?)</p>', html, re.DOTALL)
+        if desc_match:
+            desc = re.sub(r'<[^>]+>', '', desc_match.group(1)).strip()
+
+        # Extract language: <span itemprop="programmingLanguage">Python</span>
+        lang = ""
+        lang_match = re.search(
+            r'<span\s+itemprop="programmingLanguage">(.*?)</span>', html
+        )
+        if lang_match:
+            lang = lang_match.group(1).strip()
+
+        # Extract total stars: the first <a href="/owner/repo/stargazers"> ... number ... </a>
+        stars = 0
+        stars_match = re.search(
+            rf'<a[^>]*href="/{re.escape(repo_path)}/stargazers"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+        if stars_match:
+            num = re.sub(r'<[^>]+>', '', stars_match.group(1)).strip().replace(",", "")
+            if num.isdigit():
+                stars = int(num)
+
+        # Extract forks: <a href="/owner/repo/forks"> ... number ... </a>
+        forks = 0
+        forks_match = re.search(
+            rf'<a[^>]*href="/{re.escape(repo_path)}/forks"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+        if forks_match:
+            num = re.sub(r'<[^>]+>', '', forks_match.group(1)).strip().replace(",", "")
+            if num.isdigit():
+                forks = int(num)
+
+        # Extract stars today: "123 stars today" or "1,234 stars today"
+        stars_today = 0
+        today_match = re.search(r'([\d,]+)\s+stars?\s+today', html)
+        if today_match:
+            stars_today = _parse_number(today_match.group(1))
+
+        repo_name = repo_path.split("/")[-1]
+
+        return TrendItem(
+            source=Source.GITHUB,
+            source_id=repo_path,
+            title=repo_name,
+            url=url,
+            description=desc,
+            metadata={
+                "stars": stars,
+                "language": lang,
+                "forks": forks,
+                "stars_today": stars_today,
+                "owner": repo_path.split("/")[0],
+            },
+            discovered_at=datetime.now(timezone.utc),
+        )
