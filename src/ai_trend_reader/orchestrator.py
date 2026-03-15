@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import math
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -21,17 +22,23 @@ from ai_trend_reader.storage.database import Database
 
 logger = structlog.get_logger()
 
+# Top percentage of LLM-scored papers to include in the report
+ARXIV_TOP_PERCENT = 0.10
+HF_TOP_PERCENT = 0.10
+
 
 class Orchestrator:
     def __init__(self, settings: Settings, dry_run: bool = False, source: str | None = None):
         self.settings = settings
         self.dry_run = dry_run
-        self.source_filter = source  # "github", "arxiv", "huggingface", or None (all)
+        self.source_filter = source
 
     async def run(self) -> DigestReport:
         """Execute the full pipeline."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        logger.info("pipeline_start", date=today, dry_run=self.dry_run)
+        # 使用配置的分析日期或当天日期
+        target_date = self._get_target_date()
+        date_str = target_date.strftime("%Y-%m-%d")
+        logger.info("pipeline_start", date=date_str, dry_run=self.dry_run, target_date=date_str)
 
         stats = DigestStats()
 
@@ -41,7 +48,7 @@ class Orchestrator:
 
         try:
             # Step 1: Fetch from sources
-            github_items, arxiv_items, hf_items = await self._fetch_sources()
+            github_items, arxiv_items, hf_items = await self._fetch_sources(target_date)
             stats.github_fetched = len(github_items)
             stats.arxiv_fetched = len(arxiv_items)
             stats.huggingface_fetched = len(hf_items)
@@ -60,14 +67,24 @@ class Orchestrator:
                 all_items = [i for i in all_items if i.source_id in unseen_ids]
                 logger.info("dedup_complete", remaining=len(all_items))
 
-            # Step 3: Rule-based filtering
+            # Step 3: Rule-based filtering (with affiliation check for arxiv)
             rule_filter = RuleFilter(
                 self.settings.rule_filter,
                 self.settings.github,
                 self.settings.arxiv,
                 self.settings.huggingface,
             )
-            filtered_items = await rule_filter.filter(all_items)
+            filter_result = await rule_filter.filter_with_rejects(all_items)
+            filtered_items = filter_result.passed
+            rejected_items = filter_result.filtered_out
+
+            # Record rejected items in DB as 'filtered'
+            if rejected_items and not self.dry_run:
+                rejected_pairs = [
+                    (i.source_id, i.source.value) for i in rejected_items
+                ]
+                await db.mark_seen(rejected_pairs, status="filtered")
+                logger.info("filtered_items_recorded", count=len(rejected_items))
 
             github_filtered = [i for i in filtered_items if i.source == Source.GITHUB]
             arxiv_filtered = [i for i in filtered_items if i.source == Source.ARXIV]
@@ -75,6 +92,14 @@ class Orchestrator:
             stats.github_after_rules = len(github_filtered)
             stats.arxiv_after_rules = len(arxiv_filtered)
             stats.huggingface_after_rules = len(hf_filtered)
+
+            logger.info(
+                "rule_filter_summary",
+                arxiv_rejected_affiliation=len([
+                    i for i in rejected_items if i.source == Source.ARXIV
+                ]),
+                arxiv_passed=len(arxiv_filtered),
+            )
 
             # Step 4: LLM scoring (if API key is configured)
             github_scored: list[ScoredItem] = []
@@ -88,26 +113,34 @@ class Orchestrator:
                 if github_filtered:
                     github_scored = await llm_filter.score(github_filtered)
                 if arxiv_filtered:
-                    arxiv_scored = await llm_filter.score(arxiv_filtered)
+                    # Use top 10% for arxiv papers
+                    arxiv_scored = await llm_filter.score(
+                        arxiv_filtered, top_percent=ARXIV_TOP_PERCENT
+                    )
                 if hf_filtered:
-                    hf_scored = await llm_filter.score(hf_filtered)
+                    # Use top 10% for HuggingFace papers
+                    hf_scored = await llm_filter.score(
+                        hf_filtered, top_percent=HF_TOP_PERCENT
+                    )
             else:
                 logger.warning("llm_api_key_not_set_skipping_scoring")
-                # Fallback: create ScoredItems without LLM scoring
                 github_scored = [
                     ScoredItem(item=i, relevance_score=7.0) for i in github_filtered
                 ]
+                # Without LLM, take top 10% by simple ordering
+                n_arxiv = max(1, math.ceil(len(arxiv_filtered) * ARXIV_TOP_PERCENT))
                 arxiv_scored = [
                     ScoredItem(item=i, relevance_score=7.0) for i in arxiv_filtered
-                ]
+                ][:n_arxiv]
+                n_hf = max(1, math.ceil(len(hf_filtered) * HF_TOP_PERCENT))
                 hf_scored = [
                     ScoredItem(item=i, relevance_score=7.0) for i in hf_filtered
-                ]
+                ][:n_hf]
 
-            # Step 5: Take top N
+            # Step 5: Take top N (github uses fixed max, papers use top 10%)
             github_top = github_scored[: self.settings.notify.max_github_items]
-            arxiv_top = arxiv_scored[: self.settings.notify.max_arxiv_items]
-            hf_top = hf_scored[: self.settings.notify.max_huggingface_items]
+            arxiv_top = arxiv_scored  # Already top 10% from LLM filter
+            hf_top = hf_scored  # Already top 10% from LLM filter
 
             stats.github_recommended = len(github_top)
             stats.arxiv_recommended = len(arxiv_top)
@@ -115,7 +148,7 @@ class Orchestrator:
 
             # Build report
             report = DigestReport(
-                date=today,
+                date=date_str,
                 github_items=github_top,
                 arxiv_items=arxiv_top,
                 huggingface_items=hf_top,
@@ -138,11 +171,15 @@ class Orchestrator:
                     (i.source_id, i.source.value)
                     for i in github_items + arxiv_items + hf_items
                 ]
-                await db.mark_seen(seen_pairs)
+                await db.mark_seen(seen_pairs, status="seen")
 
                 # Save digest history
                 await db.save_digest(
-                    today, stats.github_recommended, stats.arxiv_recommended, ""
+                    date_str,
+                    stats.github_recommended,
+                    stats.arxiv_recommended,
+                    "",
+                    huggingface_count=stats.huggingface_recommended,
                 )
 
                 # Cleanup old records
@@ -168,8 +205,19 @@ class Orchestrator:
         finally:
             await db.close()
 
+    def _get_target_date(self) -> date:
+        """获取目标分析日期。"""
+        if self.settings.analysis_date:
+            try:
+                return datetime.strptime(self.settings.analysis_date, "%Y-%m-%d").date()
+            except ValueError:
+                logger.warning("invalid_analysis_date", date=self.settings.analysis_date)
+                return date.today()
+        return date.today()
+
     async def _fetch_sources(
         self,
+        target_date: date | None = None,
     ) -> tuple[list[TrendItem], list[TrendItem], list[TrendItem]]:
         """Fetch items from enabled sources concurrently."""
         github_items: list[TrendItem] = []
@@ -180,15 +228,15 @@ class Orchestrator:
 
         if self.source_filter in (None, "github") and self.settings.github.enabled:
             github_source = GitHubSource(self.settings.github, self.settings.github_token)
-            tasks.append(("github", github_source.fetch()))
+            tasks.append(("github", github_source.fetch(target_date)))
 
         if self.source_filter in (None, "arxiv") and self.settings.arxiv.enabled:
             arxiv_source = ArxivSource(self.settings.arxiv)
-            tasks.append(("arxiv", arxiv_source.fetch()))
+            tasks.append(("arxiv", arxiv_source.fetch(target_date)))
 
         if self.source_filter in (None, "huggingface") and self.settings.huggingface.enabled:
             hf_source = HuggingFaceSource(self.settings.huggingface)
-            tasks.append(("huggingface", hf_source.fetch()))
+            tasks.append(("huggingface", hf_source.fetch(target_date)))
 
         results = await asyncio.gather(
             *[t[1] for t in tasks],

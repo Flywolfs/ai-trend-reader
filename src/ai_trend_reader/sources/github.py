@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import httpx
 import structlog
@@ -26,12 +26,14 @@ class GitHubSource(BaseSource):
     def __init__(self, config: GitHubConfig, token: str = ""):
         self.config = config
 
-    async def fetch(self) -> list[TrendItem]:
+    async def fetch(self, target_date: date | None = None) -> list[TrendItem]:
         if not self.config.enabled:
             logger.info("github_source_disabled")
             return []
 
-        logger.info("github_trending_fetch_start")
+        # 使用目标日期或当天日期
+        fetch_date = target_date or date.today()
+        logger.info("github_trending_fetch_start", date=fetch_date.isoformat())
         items: list[TrendItem] = []
 
         try:
@@ -47,7 +49,7 @@ class GitHubSource(BaseSource):
                 resp.raise_for_status()
                 html = resp.text
 
-            items = self._parse_trending_html(html)
+            items = self._parse_trending_html(html, fetch_date)
             logger.info("github_trending_fetch_complete", total=len(items))
 
         except Exception:
@@ -55,7 +57,7 @@ class GitHubSource(BaseSource):
 
         return items
 
-    def _parse_trending_html(self, html: str) -> list[TrendItem]:
+    def _parse_trending_html(self, html: str, fetch_date: date) -> list[TrendItem]:
         """Parse GitHub Trending HTML into TrendItems without BeautifulSoup.
 
         Each trending repo is inside an <article class="Box-row"> element.
@@ -67,7 +69,7 @@ class GitHubSource(BaseSource):
         # First chunk is before the first article, skip it
         for article_html in articles[1:]:
             try:
-                item = self._parse_article(article_html)
+                item = self._parse_article(article_html, fetch_date)
                 if item:
                     items.append(item)
             except Exception:
@@ -76,7 +78,7 @@ class GitHubSource(BaseSource):
 
         return items
 
-    def _parse_article(self, html: str) -> TrendItem | None:
+    def _parse_article(self, html: str, fetch_date: date) -> TrendItem | None:
         """Parse a single <article> block into a TrendItem."""
         # Extract repo path from the h2 link, e.g. href="/owner/repo"
         # First isolate the <h2>...</h2> block, then find the <a href> inside it
@@ -154,5 +156,5 @@ class GitHubSource(BaseSource):
                 "stars_today": stars_today,
                 "owner": repo_path.split("/")[0],
             },
-            discovered_at=datetime.now(timezone.utc),
+            discovered_at=datetime.combine(fetch_date, datetime.min.time(), tzinfo=timezone.utc),
         )

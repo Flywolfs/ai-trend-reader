@@ -142,10 +142,14 @@ class ServerChanNotifier(BaseNotifier):
             author_str += " et al."
         github_repo = item.metadata.get("github_repo", "")
 
+        from ai_trend_reader.affiliations import get_affiliation_label as _get_label
+        tier = item.metadata.get("affiliation_tier")
+        tier_str = f" | {_get_label(tier)}" if tier else ""
+
         score = scored.relevance_score
         header = (
             f"### {idx}. [{item.title}]({item.url})"
-            f" | {upvotes} upvotes | 评分: {score:.1f}"
+            f" | {upvotes} upvotes | 评分: {score:.1f}{tier_str}"
         )
         lines = [header]
         if scored.summary_zh:
@@ -167,12 +171,19 @@ class ServerChanNotifier(BaseNotifier):
             author_str += " et al."
         categories = ", ".join(item.metadata.get("categories", [])[:3])
 
-        lines = [
-            f"### {idx}. [{item.title}]({item.url}) | 评分: {scored.relevance_score:.1f}",
-        ]
+        from ai_trend_reader.affiliations import get_affiliation_label
+        tier = item.metadata.get("affiliation_tier")
+        tier_str = f" | 机构: {get_affiliation_label(tier)}" if tier else ""
+
+        header = (
+            f"### {idx}. [{item.title}]({item.url})"
+            f" | 评分: {scored.relevance_score:.1f}{tier_str}"
+        )
+        lines = [header]
         if scored.summary_zh:
             lines.append(f"> {scored.summary_zh}")
         if scored.reason:
             lines.append(f"> 推荐理由: {scored.reason}")
-        lines.append(f"> 作者: {author_str} | 类别: {categories}\n")
+        lines.append(f"> 作者: {author_str} | 类别: {categories}")
+        lines.append(f"> 领域: {scored.domain.value}\n")
         return "\n".join(lines)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import httpx
 import structlog
@@ -20,12 +20,14 @@ class HuggingFaceSource(BaseSource):
     def __init__(self, config: HuggingFaceConfig):
         self.config = config
 
-    async def fetch(self) -> list[TrendItem]:
+    async def fetch(self, target_date: date | None = None) -> list[TrendItem]:
         if not self.config.enabled:
             logger.info("huggingface_source_disabled")
             return []
 
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # 使用目标日期或当天日期
+        fetch_date = target_date or date.today()
+        date_str = fetch_date.strftime("%Y-%m-%d")
         logger.info("huggingface_fetch_start", date=date_str)
 
         items: list[TrendItem] = []
@@ -50,7 +52,7 @@ class HuggingFaceSource(BaseSource):
 
             for entry in data:
                 try:
-                    item = self._parse_entry(entry)
+                    item = self._parse_entry(entry, fetch_date)
                     if item:
                         items.append(item)
                 except Exception:
@@ -63,7 +65,7 @@ class HuggingFaceSource(BaseSource):
 
         return items
 
-    def _parse_entry(self, entry: dict) -> TrendItem | None:
+    def _parse_entry(self, entry: dict, fetch_date: date) -> TrendItem | None:
         """Parse a single HuggingFace daily paper API entry."""
         paper = entry.get("paper", {})
         paper_id = paper.get("id", "")
@@ -113,5 +115,5 @@ class HuggingFaceSource(BaseSource):
                 "ai_keywords": ai_keywords,
                 "num_comments": entry.get("numComments", 0),
             },
-            discovered_at=datetime.now(timezone.utc),
+            discovered_at=datetime.combine(fetch_date, datetime.min.time(), tzinfo=timezone.utc),
         )

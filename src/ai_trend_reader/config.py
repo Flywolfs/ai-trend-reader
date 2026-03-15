@@ -97,10 +97,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Secrets from environment variables
+    # Secrets from config.yaml (优先) 或环境变量
     github_token: str = ""
-    llm_api_key: str = "sk-"
+    llm_api_key: str = ""
     serverchan_sendkey: str = ""
+
+    # 分析日期设置 (YYYY-MM-DD 格式，null 表示使用当天)
+    analysis_date: str | None = None
 
     # Nested config sections
     github: GitHubConfig = Field(default_factory=GitHubConfig)

@@ -28,6 +28,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS seen_items (
                 source_id TEXT PRIMARY KEY,
                 source TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'seen',
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL
             );
@@ -37,12 +38,14 @@ class Database:
                 date TEXT UNIQUE NOT NULL,
                 github_count INTEGER DEFAULT 0,
                 arxiv_count INTEGER DEFAULT 0,
+                huggingface_count INTEGER DEFAULT 0,
                 sent_at TEXT NOT NULL,
                 raw_content TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_seen_source ON seen_items(source);
             CREATE INDEX IF NOT EXISTS idx_seen_first ON seen_items(first_seen_at);
+            CREATE INDEX IF NOT EXISTS idx_seen_status ON seen_items(status);
         """)
         await self._db.commit()
         logger.info("database_initialized", path=str(self.db_path))
@@ -65,22 +68,32 @@ class Database:
         seen = {row[0] for row in rows}
         return set(source_ids) - seen
 
-    async def mark_seen(self, items: list[tuple[str, str]]) -> None:
-        """Mark items as seen. Each item is (source_id, source)."""
+    async def mark_seen(self, items: list[tuple[str, str]], status: str = "seen") -> None:
+        """Mark items as seen. Each item is (source_id, source).
+
+        Args:
+            items: List of (source_id, source) tuples.
+            status: 'seen' for normal items, 'filtered' for discarded items.
+        """
         if not items or not self._db:
             return
 
         now = datetime.now(timezone.utc).isoformat()
         await self._db.executemany(
-            """INSERT INTO seen_items (source_id, source, first_seen_at, last_seen_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(source_id) DO UPDATE SET last_seen_at = ?""",
-            [(sid, src, now, now, now) for sid, src in items],
+            """INSERT INTO seen_items (source_id, source, status, first_seen_at, last_seen_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(source_id) DO UPDATE SET last_seen_at = ?, status = ?""",
+            [(sid, src, status, now, now, now, status) for sid, src in items],
         )
         await self._db.commit()
 
     async def save_digest(
-        self, date: str, github_count: int, arxiv_count: int, content: str
+        self,
+        date: str,
+        github_count: int,
+        arxiv_count: int,
+        content: str,
+        huggingface_count: int = 0,
     ) -> None:
         """Save digest history."""
         if not self._db:
@@ -89,9 +102,9 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT OR REPLACE INTO digest_history
-               (date, github_count, arxiv_count, sent_at, raw_content)
-               VALUES (?, ?, ?, ?, ?)""",
-            (date, github_count, arxiv_count, now, content),
+               (date, github_count, arxiv_count, huggingface_count, sent_at, raw_content)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (date, github_count, arxiv_count, huggingface_count, now, content),
         )
         await self._db.commit()
 
